@@ -1,0 +1,220 @@
+#include <AFMotor.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// Pin definitions for ultrasonic sensor
+#define TRIG_PIN A0
+#define ECHO_PIN A1
+// Pin definition for moisture sensor
+#define MOISTURE_PIN A2
+
+// OLED Display definitions
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+// Create display object
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1); // No reset pin
+
+//initial motors pin
+AF_DCMotor motor1(1);
+AF_DCMotor motor2(2);
+AF_DCMotor motor3(3);
+AF_DCMotor motor4(4);
+
+char command;
+bool personDetected = false;
+float distance_cm = 0;
+int moistureValue = 0;
+
+void setup()
+{
+  Serial.begin(9600); // Communication with ESP32-CAM or computer
+  
+  // Initialize motors
+  motor1.setSpeed(0);
+  motor2.setSpeed(0);
+  motor3.setSpeed(0);
+  motor4.setSpeed(0);
+  
+  motor1.run(RELEASE);
+  motor2.run(RELEASE);
+  motor3.run(RELEASE);
+  motor4.run(RELEASE);
+  
+  // Initialize ultrasonic sensor pins
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  // Moisture sensor uses analog input, no pinMode needed
+  
+  // Initialize the OLED display
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // I2C address 0x3C
+    Serial.println(F("SSD1306 initialization failed!"));
+    for (;;);
+  }
+  
+  // Draw initial smiley face
+  drawSmiley();
+}
+
+void loop(){
+  // Measure distance with ultrasonic sensor
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  long duration = pulseIn(ECHO_PIN, HIGH);
+  distance_cm = duration * 0.034 / 2;
+
+  Serial.print("Distance: ");
+  Serial.print(distance_cm);
+  Serial.println(" cm");
+  
+  // Read moisture sensor
+  moistureValue = analogRead(MOISTURE_PIN);  // Reads value from 0 to 1023
+  Serial.print("Moisture level: ");
+  Serial.println(moistureValue);
+  
+  // Update display with sensor information
+  updateDisplay();
+  
+  if(Serial.available() > 0){
+    command = Serial.read();
+    Stop(); // Stop before executing new command
+    
+    // Process direct movement commands from serial monitor
+    switch(command){
+      case 'F':
+        forward();
+        break;
+      case 'B':
+        back();
+        break;
+      case 'L':
+        left();
+        break;
+      case 'R':
+        right();
+        break;
+      case 'P': // Person detected command from ESP32-CAM
+        personDetected = true;
+        // You can add custom behavior when a person is detected
+        // For example, stop the robot or move toward the person
+        Stop();
+        break;
+      case 'N': // No person detected from ESP32-CAM
+        personDetected = false;
+        break;
+    }
+  }
+  
+  // Optional: Add autonomous behavior based on personDetected flag
+  // For example, if personDetected is true, you might want to:
+  // 1. Flash an LED
+  // 2. Make a specific movement pattern
+  // 3. Sound a buzzer
+  
+  // Optional: Add obstacle avoidance using the ultrasonic sensor
+  // For example:
+  // if(distance_cm < 20) {
+  //   Stop();
+  //   delay(500);
+  //   back();
+  //   delay(1000);
+  //   left();
+  //   delay(800);
+  // }
+  
+  delay(100); // Small delay for stability
+}
+
+void drawSmiley() {
+  // Clear the display buffer
+  display.clearDisplay();
+
+  // Draw head (big circle)
+  display.drawCircle(64, 32, 30, WHITE); // Center x=64, y=32, radius=30
+
+  // Draw eyes
+  display.fillCircle(52, 24, 3, WHITE); // Left eye
+  display.fillCircle(76, 24, 3, WHITE); // Right eye
+
+  // Draw a smiling mouth using pixels (approximation)
+  display.drawPixel(55, 44, WHITE);
+  display.drawPixel(58, 46, WHITE);
+  display.drawPixel(61, 47, WHITE);
+  display.drawPixel(64, 48, WHITE);
+  display.drawPixel(67, 47, WHITE);
+  display.drawPixel(70, 46, WHITE);
+  display.drawPixel(73, 44, WHITE);
+
+  // Show everything on screen
+  display.display();
+}
+
+void updateDisplay() {
+  // Draw smiley face instead of data
+  drawSmiley();
+}
+
+void forward()
+{
+  motor1.setSpeed(255); //Define maximum speed
+  motor1.run(FORWARD); //rotate the motor clockwise
+  motor2.setSpeed(255); //Define maximum speed
+  motor2.run(FORWARD); //rotate the motor clockwise
+  motor3.setSpeed(255);//Define maximum speed
+  motor3.run(FORWARD); //rotate the motor clockwise
+  motor4.setSpeed(255);//Define maximum speed
+  motor4.run(BACKWARD); //rotate the motor counter-clockwise to actually move forward
+}
+
+void back()
+{
+  motor1.setSpeed(255); //Define maximum speed
+  motor1.run(BACKWARD); //rotate the motor counter-clockwise
+  motor2.setSpeed(255); //Define maximum speed
+  motor2.run(BACKWARD); //rotate the motor counter-clockwise
+  motor3.setSpeed(255); //Define maximum speed
+  motor3.run(BACKWARD); //rotate the motor counter-clockwise
+  motor4.setSpeed(255); //Define maximum speed
+  motor4.run(FORWARD); //rotate the motor clockwise to actually move backward
+}
+
+void left()
+{
+  motor1.setSpeed(255); //Define maximum speed
+  motor1.run(FORWARD); //reversed: now rotate the motor clockwise
+  motor2.setSpeed(255); //Define maximum speed
+  motor2.run(BACKWARD); //rotate the motor counter-clockwise
+  motor3.setSpeed(255); //Define maximum speed
+  motor3.run(BACKWARD); //reversed: now rotate the motor counter-clockwise
+  motor4.setSpeed(255); //Define maximum speed
+  motor4.run(BACKWARD); //rotate the motor counter-clockwise (reversed direction)
+}
+
+void right()
+{
+  motor1.setSpeed(255); //Define maximum speed
+  motor1.run(BACKWARD); //reversed: now rotate the motor counter-clockwise
+  motor2.setSpeed(255); //Define maximum speed
+  motor2.run(FORWARD); //rotate the motor clockwise
+  motor3.setSpeed(255); //Define maximum speed
+  motor3.run(FORWARD); //reversed: now rotate the motor clockwise
+  motor4.setSpeed(255); //Define maximum speed
+  motor4.run(FORWARD); //rotate the motor clockwise (reversed direction)
+}
+
+void Stop()
+{
+  motor1.setSpeed(0); //Define minimum speed
+  motor1.run(RELEASE); //stop the motor when release the button
+  motor2.setSpeed(0); //Define minimum speed
+  motor2.run(RELEASE); //rotate the motor clockwise
+  motor3.setSpeed(0); //Define minimum speed
+  motor3.run(RELEASE); //stop the motor when release the button
+  motor4.setSpeed(0); //Define minimum speed
+  motor4.run(RELEASE); //stop the motor when release the button
+}

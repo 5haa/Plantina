@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ESP32-CAM Person Detection</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body data-webcam="{{ 'true' if use_webcam else 'false' }}">
+    <div class="container">
+        <h1>ESP32-CAM Person Detection</h1>
+        
+        <div class="mode-switch">
+            <h3>Camera Mode</h3>
+            <p id="current-mode">Current mode: <span id="mode-name">Browser Camera</span></p>
+            <button class="mode-button" onclick="toggleMode()">Switch to ESP32-CAM</button>
+        </div>
+        
+        <div class="video-container">
+            <div style="position: relative; display: inline-block;">
+                <img id="video-feed" src="{{ url_for('video_feed') }}" width="640" height="480">
+                <div id="performance-stats">FPS: --</div>
+            </div>
+        </div>
+        
+        <div class="browser-cam-container" id="browser-cam-section" style="display:block;">
+            <h3>Browser Camera</h3>
+            <p>Using your browser's camera for detection:</p>
+            <video id="browser-video" autoplay playsinline></video>
+            <div class="browser-cam-controls">
+                <button id="browser-start-btn" onclick="startBrowserCamera()">Start Camera</button>
+                <button id="browser-stop-btn" onclick="stopBrowserCamera()" disabled>Stop Camera</button>
+            </div>
+            <p id="browser-status">Detection is automatic once camera is started.</p>
+        </div>
+        
+        <div class="status">
+            <h3>Status</h3>
+            <p id="detection-status">Waiting for detection...</p>
+        </div>
+        
+        <div class="controls">
+            <h3>Manual Controls</h3>
+            <button onclick="sendCommand('F')">Forward</button><br>
+            <button onclick="sendCommand('L')">Left</button>
+            <button onclick="sendCommand('S')">Stop</button>
+            <button onclick="sendCommand('R')">Right</button><br>
+            <button onclick="sendCommand('B')">Back</button>
+        </div>
+    </div>
+    
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
+    
