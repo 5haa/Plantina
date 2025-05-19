@@ -1,7 +1,5 @@
 #include <AFMotor.h>
 #include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
 
 // Pin definitions for ultrasonic sensor
 #define TRIG_PIN A0
@@ -9,12 +7,26 @@
 // Pin definition for moisture sensor
 #define MOISTURE_PIN A2
 
-// OLED Display definitions
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
+// Thresholds and constants
+#define MOISTURE_THRESHOLD 300   // Adjust based on your sensor (lower = drier)
+#define APPROACH_DISTANCE 30     // Distance in cm to stop when approaching human
+#define FOLLOW_DISTANCE 50       // Distance in cm to maintain when following
+#define OBSTACLE_DISTANCE 20     // Distance in cm to detect obstacles
+#define OBSTACLE_TIMEOUT 5000    // Max time for obstacle avoidance (ms)
 
-// Create display object
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1); // No reset pin
+// Robot states
+#define STATE_IDLE 0
+#define STATE_SEARCHING 1
+#define STATE_APPROACHING 2
+#define STATE_TALKING 3
+#define STATE_FOLLOWING 4
+#define STATE_ASKING_WATER 5    // State for asking for water
+#define STATE_AVOIDING_OBSTACLE 6 // State for obstacle avoidance
+
+// Obstacle avoidance stages
+#define AVOID_STAGE_TURN 0
+#define AVOID_STAGE_FORWARD 1
+#define AVOID_STAGE_RETURN 2
 
 //initial motors pin
 AF_DCMotor motor1(1);
@@ -26,12 +38,28 @@ char command;
 bool personDetected = false;
 float distance_cm = 0;
 int moistureValue = 0;
+int robotState = STATE_IDLE;
+unsigned long lastStateChange = 0;
+bool plantNeedsWater = false;
+unsigned long searchStartTime = 0;
+unsigned long talkingStartTime = 0;
+unsigned long askingWaterStartTime = 0;
+unsigned long obstacleAvoidanceStartTime = 0;
+int obstacleAvoidanceStage = AVOID_STAGE_TURN;
+int obstacleAvoidanceDirection = 1; // 1 = right, -1 = left
+int lastHumanDirection = 0; // For tracking human position after obstacle avoidance
+
+// Flag to track ESP32-CAM initialization
+bool esp32CamInitialized = false;
+unsigned long lastCommandTime = 0; // Track when we last received a command
+unsigned long firstCommandTime = 0; // Track when we first received a command
+const unsigned long AUTO_INIT_TIMEOUT = 3000; // Auto-initialize after receiving commands for 3 seconds
 
 void setup()
 {
   Serial.begin(9600); // Communication with ESP32-CAM or computer
   
-  // Initialize motors
+  // Initialize motors but don't activate them yet
   motor1.setSpeed(0);
   motor2.setSpeed(0);
   motor3.setSpeed(0);
@@ -47,18 +75,73 @@ void setup()
   pinMode(ECHO_PIN, INPUT);
   // Moisture sensor uses analog input, no pinMode needed
   
-  // Initialize the OLED display
-  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // I2C address 0x3C
-    Serial.println(F("SSD1306 initialization failed!"));
-    for (;;);
-  }
+  // Initialize random seed for obstacle avoidance direction
+  randomSeed(analogRead(A3));
   
-  // Draw initial smiley face
-  drawSmiley();
+  // Send initialization request to ESP32-CAM
+  Serial.println("INIT_REQUEST");
+  
+  // Print startup message
+  Serial.println("Robot initialized. Waiting for ESP32-CAM...");
 }
 
-void loop(){
-  // Measure distance with ultrasonic sensor
+void loop() {
+  // Read sensors
+  readUltrasonicSensor();
+  readMoistureSensor();
+  
+  // Check for commands from serial
+  checkSerialCommands();
+  
+  // Only proceed with state machine if ESP32-CAM is initialized
+  if (esp32CamInitialized) {
+    // State machine for robot behavior
+    switch (robotState) {
+      case STATE_IDLE:
+        handleIdleState();
+        break;
+        
+      case STATE_SEARCHING:
+        handleSearchingState();
+        break;
+        
+      case STATE_APPROACHING:
+        handleApproachingState();
+        break;
+        
+      case STATE_TALKING:
+        handleTalkingState();
+        break;
+        
+      case STATE_FOLLOWING:
+        handleFollowingState();
+        break;
+        
+      case STATE_ASKING_WATER:
+        handleAskingWaterState();
+        break;
+        
+      case STATE_AVOIDING_OBSTACLE:
+        handleObstacleAvoidanceState();
+        break;
+    }
+  } else {
+    // If ESP32-CAM not initialized, keep motors stopped
+    Stop();
+    
+    // Periodically send initialization request
+    static unsigned long lastInitRequest = 0;
+    if (millis() - lastInitRequest > 5000) { // Every 5 seconds
+      Serial.println("INIT_REQUEST");
+      lastInitRequest = millis();
+      Serial.println("Waiting for ESP32-CAM initialization...");
+    }
+  }
+  
+  delay(50); // Small delay for stability
+}
+
+void readUltrasonicSensor() {
   digitalWrite(TRIG_PIN, LOW);
   delayMicroseconds(2);
   digitalWrite(TRIG_PIN, HIGH);
@@ -71,96 +154,387 @@ void loop(){
   Serial.print("Distance: ");
   Serial.print(distance_cm);
   Serial.println(" cm");
-  
-  // Read moisture sensor
+}
+
+void readMoistureSensor() {
   moistureValue = analogRead(MOISTURE_PIN);  // Reads value from 0 to 1023
+  plantNeedsWater = moistureValue < MOISTURE_THRESHOLD;
+  
   Serial.print("Moisture level: ");
-  Serial.println(moistureValue);
-  
-  // Update display with sensor information
-  updateDisplay();
-  
-  if(Serial.available() > 0){
+  Serial.print(moistureValue);
+  Serial.print(" - Plant needs water: ");
+  Serial.println(plantNeedsWater ? "YES" : "NO");
+}
+
+void checkSerialCommands() {
+  if (Serial.available() > 0) {
     command = Serial.read();
-    Stop(); // Stop before executing new command
     
-    // Process direct movement commands from serial monitor
-    switch(command){
-      case 'F':
-        forward();
-        break;
-      case 'B':
-        back();
-        break;
-      case 'L':
-        left();
-        break;
-      case 'R':
+    // Update command timing for auto-initialization
+    lastCommandTime = millis();
+    if (firstCommandTime == 0) {
+      firstCommandTime = millis();
+    }
+    
+    // Check for ESP32-CAM initialization confirmation
+    if (command == 'I') { // 'I' for Initialized
+      esp32CamInitialized = true;
+      Serial.println("ESP32-CAM initialized successfully!");
+      return;
+    }
+    
+    // Auto-initialize if we've been receiving commands for a while
+    if (!esp32CamInitialized && (millis() - firstCommandTime > AUTO_INIT_TIMEOUT)) {
+      esp32CamInitialized = true;
+      Serial.println("ESP32-CAM auto-initialized based on command activity!");
+    }
+    
+    // Process commands - we'll now process them even if not fully initialized
+    // This allows the ESP32-CAM to control the robot as soon as it starts sending commands
+    switch(command) {
+        case 'F':
+          forward();
+          break;
+        case 'B':
+          back();
+          break;
+        case 'L':
+          left();
+          break;
+        case 'R':
+          right();
+          break;
+        case 'S':
+          Stop();
+          break;
+        case 'P': // Person detected command from ESP32-CAM
+          personDetected = true;
+          Serial.println("Person detected by camera");
+          // Track direction where human was last seen (for obstacle avoidance)
+          lastHumanDirection = 0; // Centered/forward
+          break;
+        case 'N': // No person detected from ESP32-CAM
+          personDetected = false;
+          Serial.println("No person detected by camera");
+          break;
+        case 'D': // Person detected on right side of camera view
+          personDetected = true;
+          lastHumanDirection = 1; // Right
+          Serial.println("Person detected on right");
+          break;
+        case 'A': // Person detected on left side of camera view
+          personDetected = true; 
+          lastHumanDirection = -1; // Left
+          Serial.println("Person detected on left");
+          break;
+      }
+    }
+}
+
+void handleIdleState() {
+  Stop();
+  
+  // If plant needs water, start searching
+  if (plantNeedsWater) {
+    changeState(STATE_SEARCHING);
+    searchStartTime = millis();
+  }
+}
+
+void handleSearchingState() {
+  // Search pattern: spin around to find a person
+  left();
+  
+  // If a person is detected by camera, start approaching
+  if (personDetected) {
+    Stop(); // Stop spinning when person detected
+    changeState(STATE_APPROACHING);
+  }
+  
+  // Obstacle detection during searching
+  if (distance_cm < OBSTACLE_DISTANCE) {
+    // Just change direction if we encounter an obstacle while searching
+    right();
+    delay(1000);
+    left();
+  }
+  
+  // Timeout: if searching for too long, go back to idle temporarily
+  if (millis() - searchStartTime > 20000) { // 20 seconds timeout
+    changeState(STATE_IDLE);
+    delay(5000); // Wait 5 seconds before potentially starting again
+  }
+}
+
+void handleApproachingState() {
+  // Check if plant has been watered
+  if (!plantNeedsWater) {
+    // Plant got water, go back to idle
+    Stop();
+    changeState(STATE_IDLE);
+    return;
+  }
+  
+  if (!personDetected) {
+    // Lost the person, go back to searching
+    changeState(STATE_SEARCHING);
+    return;
+  }
+  
+  // Check for obstacles
+  if (distance_cm < OBSTACLE_DISTANCE) {
+    // Obstacle detected, start avoidance
+    // Remember we were approaching before obstacle detection
+    changeState(STATE_AVOIDING_OBSTACLE);
+    obstacleAvoidanceStartTime = millis();
+    obstacleAvoidanceStage = AVOID_STAGE_TURN;
+    
+    // Choose random direction for initial turn (right or left)
+    obstacleAvoidanceDirection = (random(2) == 0) ? 1 : -1;
+    return;
+  }
+  
+  // Adjust trajectory based on human position
+  if (lastHumanDirection > 0) {
+    // Human is to the right, turn slightly right
+    adjustedForward(1);
+  } else if (lastHumanDirection < 0) {
+    // Human is to the left, turn slightly left
+    adjustedForward(-1);
+  } else {
+    // Human is centered or position unknown, go straight
+    forward();
+  }
+  
+  // If we get close enough to the human and need water, ask for it
+  if (distance_cm < APPROACH_DISTANCE && plantNeedsWater) {
+    // We've reached the person, stop and ask for water
+    Stop();
+    changeState(STATE_ASKING_WATER);
+    askingWaterStartTime = millis();
+    return;
+  } else if (distance_cm < APPROACH_DISTANCE) {
+    // We've reached the person, stop and start talking
+    Stop();
+    changeState(STATE_TALKING);
+    talkingStartTime = millis();
+    return;
+  }
+}
+
+void handleObstacleAvoidanceState() {
+  // Check if plant has been watered during obstacle avoidance
+  if (!plantNeedsWater) {
+    // Plant got water, go back to idle
+    changeState(STATE_IDLE);
+    return;
+  }
+  
+  // Check if we've spent too long avoiding obstacle
+  if (millis() - obstacleAvoidanceStartTime > OBSTACLE_TIMEOUT) {
+    // Timeout, go back to searching
+    changeState(STATE_SEARCHING);
+    return;
+  }
+  
+  // If the obstacle is clear and we're past the forward stage,
+  // return to approaching
+  if (distance_cm > OBSTACLE_DISTANCE * 1.5 && 
+      obstacleAvoidanceStage == AVOID_STAGE_RETURN) {
+    if (personDetected) {
+      changeState(STATE_APPROACHING);
+    } else {
+      changeState(STATE_SEARCHING);
+    }
+    return;
+  }
+  
+  // Obstacle avoidance state machine
+  switch (obstacleAvoidanceStage) {
+    case AVOID_STAGE_TURN:
+      // Turn to avoid obstacle
+      if (obstacleAvoidanceDirection > 0) {
         right();
-        break;
-      case 'P': // Person detected command from ESP32-CAM
-        personDetected = true;
-        // You can add custom behavior when a person is detected
-        // For example, stop the robot or move toward the person
-        Stop();
-        break;
-      case 'N': // No person detected from ESP32-CAM
-        personDetected = false;
-        break;
+      } else {
+        left();
+      }
+      
+      // Check if we can see forward and path is clear
+      if (distance_cm > OBSTACLE_DISTANCE * 1.5) {
+        obstacleAvoidanceStage = AVOID_STAGE_FORWARD;
+      }
+      break;
+      
+    case AVOID_STAGE_FORWARD:
+      // Move forward to go around obstacle
+      forward();
+      
+      // Check if we've gone far enough
+      if (millis() - obstacleAvoidanceStartTime > 2000) {
+        obstacleAvoidanceStage = AVOID_STAGE_RETURN;
+      }
+      break;
+      
+    case AVOID_STAGE_RETURN:
+      // Turn back toward original direction
+      if (obstacleAvoidanceDirection > 0) {
+        left(); // Turn left if we turned right initially
+      } else {
+        right(); // Turn right if we turned left initially
+      }
+      
+      // Try to find the person again
+      if (personDetected) {
+        changeState(STATE_APPROACHING);
+      } else if (!personDetected && millis() - obstacleAvoidanceStartTime > 3000) {
+        // If we can't find the person after trying for a while, go back to searching
+        changeState(STATE_SEARCHING);
+      }
+      break;
+  }
+  
+  // Lost the person completely, go back to searching
+  if (!personDetected && millis() - obstacleAvoidanceStartTime > 4000) {
+    changeState(STATE_SEARCHING);
+  }
+}
+
+void handleTalkingState() {
+  Stop(); // Make sure we're stopped while talking
+  
+  // Check if plant has been watered during talking
+  if (!plantNeedsWater) {
+    // Plant got water, go back to idle
+    Stop();
+    changeState(STATE_IDLE);
+    return;
+  }
+  
+  // After talking for a while, switch to following mode
+  if (millis() - talkingStartTime > 5000) { // Talk for 5 seconds
+    changeState(STATE_FOLLOWING);
+  }
+  
+  // If person walks away during talking, go back to searching
+  if (!personDetected || distance_cm > APPROACH_DISTANCE * 2) {
+    changeState(STATE_SEARCHING);
+  }
+}
+
+void handleAskingWaterState() {
+  Stop(); // Make sure we're stopped while asking for water
+  
+  // Keep asking for water until plant is watered or timeout
+  if (!plantNeedsWater) {
+    // Plant got water, switch to happy and go to idle
+    changeState(STATE_IDLE);
+  }
+  
+  // If asking for too long, switch to following
+  if (millis() - askingWaterStartTime > 10000) { // Ask for 10 seconds
+    changeState(STATE_FOLLOWING);
+  }
+  
+  // If person walks away while asking, go back to approaching
+  if (!personDetected || distance_cm > APPROACH_DISTANCE * 2) {
+    changeState(STATE_SEARCHING);
+  }
+}
+
+void handleFollowingState() {
+  if (!personDetected) {
+    // Lost the person, go back to searching
+    changeState(STATE_SEARCHING);
+    return;
+  }
+  
+  // Check for obstacles
+  if (distance_cm < OBSTACLE_DISTANCE) {
+    // Obstacle detected, start avoidance
+    changeState(STATE_AVOIDING_OBSTACLE);
+    obstacleAvoidanceStartTime = millis();
+    obstacleAvoidanceStage = AVOID_STAGE_TURN;
+    obstacleAvoidanceDirection = (random(2) == 0) ? 1 : -1;
+    return;
+  }
+  
+  // Maintain follow distance
+  if (distance_cm < APPROACH_DISTANCE) {
+    // Too close, stop
+    Stop();
+  } else if (distance_cm < FOLLOW_DISTANCE) {
+    // Good distance, stay still
+    Stop();
+  } else {
+    // Too far, move closer while adjusting for human position
+    if (lastHumanDirection > 0) {
+      // Human is to the right, turn slightly right
+      adjustedForward(1);
+    } else if (lastHumanDirection < 0) {
+      // Human is to the left, turn slightly left
+      adjustedForward(-1);
+    } else {
+      // Human is centered or position unknown, go straight
+      forward();
     }
   }
   
-  // Optional: Add autonomous behavior based on personDetected flag
-  // For example, if personDetected is true, you might want to:
-  // 1. Flash an LED
-  // 2. Make a specific movement pattern
-  // 3. Sound a buzzer
+  // If the plant needs water and we're close to a person, ask for water
+  if (plantNeedsWater && distance_cm < APPROACH_DISTANCE) {
+    Stop();
+    changeState(STATE_ASKING_WATER);
+    askingWaterStartTime = millis();
+    return;
+  }
   
-  // Optional: Add obstacle avoidance using the ultrasonic sensor
-  // For example:
-  // if(distance_cm < 20) {
-  //   Stop();
-  //   delay(500);
-  //   back();
-  //   delay(1000);
-  //   left();
-  //   delay(800);
-  // }
-  
-  delay(100); // Small delay for stability
+  // Check if plant has been watered
+  if (!plantNeedsWater) {
+    // Plant got water, go back to idle
+    Stop(); // Make sure to stop before changing state
+    changeState(STATE_IDLE);
+  }
 }
 
-void drawSmiley() {
-  // Clear the display buffer
-  display.clearDisplay();
-
-  // Draw head (big circle)
-  display.drawCircle(64, 32, 30, WHITE); // Center x=64, y=32, radius=30
-
-  // Draw eyes
-  display.fillCircle(52, 24, 3, WHITE); // Left eye
-  display.fillCircle(76, 24, 3, WHITE); // Right eye
-
-  // Draw a smiling mouth using pixels (approximation)
-  display.drawPixel(55, 44, WHITE);
-  display.drawPixel(58, 46, WHITE);
-  display.drawPixel(61, 47, WHITE);
-  display.drawPixel(64, 48, WHITE);
-  display.drawPixel(67, 47, WHITE);
-  display.drawPixel(70, 46, WHITE);
-  display.drawPixel(73, 44, WHITE);
-
-  // Show everything on screen
-  display.display();
+void changeState(int newState) {
+  // Always stop motors when changing state
+  Stop();
+  
+  robotState = newState;
+  lastStateChange = millis();
+  
+  // Debug output
+  Serial.print("Changing state to: ");
+  switch (newState) {
+    case STATE_IDLE: Serial.println("IDLE"); break;
+    case STATE_SEARCHING: Serial.println("SEARCHING"); break;
+    case STATE_APPROACHING: Serial.println("APPROACHING"); break;
+    case STATE_TALKING: Serial.println("TALKING"); break;
+    case STATE_FOLLOWING: Serial.println("FOLLOWING"); break;
+    case STATE_ASKING_WATER: Serial.println("ASKING_WATER"); break;
+    case STATE_AVOIDING_OBSTACLE: Serial.println("AVOIDING_OBSTACLE"); break;
+  }
 }
 
-void updateDisplay() {
-  // Draw smiley face instead of data
-  drawSmiley();
+// Adjusted forward movement to slightly adjust course while moving
+void adjustedForward(int direction) {
+  // direction: -1 for left, 1 for right, 0 for straight
+  
+  motor1.setSpeed(255 - (direction > 0 ? 50 : 0)); // Reduce right side speed to turn right
+  motor1.run(FORWARD);
+  
+  motor2.setSpeed(255 - (direction < 0 ? 50 : 0)); // Reduce left side speed to turn left
+  motor2.run(FORWARD);
+  
+  motor3.setSpeed(255 - (direction > 0 ? 50 : 0)); // Reduce right side speed to turn right
+  motor3.run(FORWARD);
+  
+  motor4.setSpeed(255 - (direction < 0 ? 50 : 0)); // Reduce left side speed to turn left
+  motor4.run(BACKWARD);
 }
 
 void forward()
 {
+  
   motor1.setSpeed(255); //Define maximum speed
   motor1.run(FORWARD); //rotate the motor clockwise
   motor2.setSpeed(255); //Define maximum speed
@@ -173,6 +547,7 @@ void forward()
 
 void back()
 {
+  
   motor1.setSpeed(255); //Define maximum speed
   motor1.run(BACKWARD); //rotate the motor counter-clockwise
   motor2.setSpeed(255); //Define maximum speed
@@ -185,6 +560,7 @@ void back()
 
 void left()
 {
+  
   motor1.setSpeed(255); //Define maximum speed
   motor1.run(FORWARD); //reversed: now rotate the motor clockwise
   motor2.setSpeed(255); //Define maximum speed
@@ -197,6 +573,7 @@ void left()
 
 void right()
 {
+  
   motor1.setSpeed(255); //Define maximum speed
   motor1.run(BACKWARD); //reversed: now rotate the motor counter-clockwise
   motor2.setSpeed(255); //Define maximum speed
