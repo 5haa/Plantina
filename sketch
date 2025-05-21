@@ -1,597 +1,546 @@
 #include <AFMotor.h>
 #include <Wire.h>
+#include <NewPing.h>  // For better ultrasonic sensor readings
+#include <Servo.h>    // Add Servo library for waving
+#include <avr/pgmspace.h> // For PROGMEM
 
-// Pin definitions for ultrasonic sensor
-#define TRIG_PIN A0
-#define ECHO_PIN A1
-// Pin definition for moisture sensor
-#define MOISTURE_PIN A2
+// Pin definitions
+#define TRIG_PIN A0     // Ultrasonic sensor trigger pin
+#define ECHO_PIN A1     // Ultrasonic sensor echo pin
+#define MOISTURE_PIN A2 // Moisture sensor pin
+#define SERVO_PIN 10    // Servo 1 on Adafruit Motor Shield
 
 // Thresholds and constants
 #define MOISTURE_THRESHOLD 300   // Adjust based on your sensor (lower = drier)
-#define APPROACH_DISTANCE 30     // Distance in cm to stop when approaching human
-#define FOLLOW_DISTANCE 50       // Distance in cm to maintain when following
-#define OBSTACLE_DISTANCE 20     // Distance in cm to detect obstacles
-#define OBSTACLE_TIMEOUT 5000    // Max time for obstacle avoidance (ms)
+#define OBSTACLE_DISTANCE 35     // Increased distance to detect obstacles earlier (cm)
+#define MAXIMUM_DISTANCE 200     // Maximum distance to detect (cm)
+#define TURN_DELAY 800           // Time to turn in milliseconds
+#define BACKWARD_DELAY 500       // Time to move backward in milliseconds
+#define PERSON_APPROACH_DISTANCE 70 // Distance to stop approaching person (cm)
 
 // Robot states
-#define STATE_IDLE 0
-#define STATE_SEARCHING 1
-#define STATE_APPROACHING 2
-#define STATE_TALKING 3
-#define STATE_FOLLOWING 4
-#define STATE_ASKING_WATER 5    // State for asking for water
-#define STATE_AVOIDING_OBSTACLE 6 // State for obstacle avoidance
+#define STATE_WAITING_FOR_CAMERA 0  // Waiting for camera to initialize
+#define STATE_IDLE 1                // Plant doesn't need water, stay still
+#define STATE_MOVING 2              // Plant needs water, moving around
+#define STATE_APPROACHING_PERSON 3  // Approaching detected person
 
-// Obstacle avoidance stages
-#define AVOID_STAGE_TURN 0
-#define AVOID_STAGE_FORWARD 1
-#define AVOID_STAGE_RETURN 2
+// Person direction constants
+#define DIRECTION_NONE 0
+#define DIRECTION_LEFT 1
+#define DIRECTION_CENTER 2
+#define DIRECTION_RIGHT 3
 
-//initial motors pin
+// Initialize motors
 AF_DCMotor motor1(1);
 AF_DCMotor motor2(2);
 AF_DCMotor motor3(3);
 AF_DCMotor motor4(4);
 
-char command;
-bool personDetected = false;
-float distance_cm = 0;
-int moistureValue = 0;
-int robotState = STATE_IDLE;
-unsigned long lastStateChange = 0;
-bool plantNeedsWater = false;
-unsigned long searchStartTime = 0;
-unsigned long talkingStartTime = 0;
-unsigned long askingWaterStartTime = 0;
-unsigned long obstacleAvoidanceStartTime = 0;
-int obstacleAvoidanceStage = AVOID_STAGE_TURN;
-int obstacleAvoidanceDirection = 1; // 1 = right, -1 = left
-int lastHumanDirection = 0; // For tracking human position after obstacle avoidance
+// Initialize servo for waving
+Servo waveServo;
+const int8_t WAVE_START_POS    = 90;    // Center position
+const int8_t WAVE_LEFT_POS     = 45;    // Left wave position
+const int8_t WAVE_RIGHT_POS    = 135;   // Right wave position
+const uint16_t WAVE_DURATION = 3000; // Wave for 3 seconds
+bool isWaving            = false;   // Flag to indicate if waving is active
+uint32_t waveStartTime  = 0;       // To track waving duration
+uint32_t lastWaveTime   = 0;       // For wave motion timing
 
-// Flag to track ESP32-CAM initialization
-bool esp32CamInitialized = false;
-unsigned long lastCommandTime = 0; // Track when we last received a command
-unsigned long firstCommandTime = 0; // Track when we first received a command
-const unsigned long AUTO_INIT_TIMEOUT = 3000; // Auto-initialize after receiving commands for 3 seconds
+// Initialize ultrasonic sensor
+NewPing sonar(TRIG_PIN, ECHO_PIN, MAXIMUM_DISTANCE);
 
-void setup()
-{
-  Serial.begin(9600); // Communication with ESP32-CAM or computer
-  
-  // Initialize motors but don't activate them yet
-  motor1.setSpeed(0);
-  motor2.setSpeed(0);
-  motor3.setSpeed(0);
-  motor4.setSpeed(0);
-  
-  motor1.run(RELEASE);
-  motor2.run(RELEASE);
-  motor3.run(RELEASE);
-  motor4.run(RELEASE);
-  
-  // Initialize ultrasonic sensor pins
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
-  // Moisture sensor uses analog input, no pinMode needed
-  
-  // Initialize random seed for obstacle avoidance direction
+// Variables
+uint16_t distance               = 100;     // Current distance to obstacle
+bool goesForward          = false;   // Flag for forward movement
+uint16_t moistureValue         = 0;       // Current moisture reading
+bool plantNeedsWater      = false;   // Flag for water status
+uint8_t robotState            = STATE_WAITING_FOR_CAMERA;  // Current robot state
+bool cameraInitialized    = false;   // Flag for camera initialization
+bool personDetected       = false;   // Flag for person detection
+uint8_t personCommandReceived = 0;       // Counter for person detection signals
+uint8_t personDirection       = DIRECTION_NONE; // Direction of detected person
+bool approachingComplete  = false;   // Flag to indicate if approaching is complete
+
+// Timing
+uint32_t lastObstacleTime    = 0;
+uint32_t lastPersonDebugTime = 0;
+const uint16_t PERSON_DEBUG_INTERVAL = 1000; // 1 s
+uint32_t lastSensorDataSent  = 0;
+const uint16_t SENSOR_DATA_INTERVAL   = 1000; // 1 s
+uint32_t lastStateChangeTime = 0;     // Time of last state change
+uint32_t startTime           = 0;     // For tracking elapsed time
+
+char command;  // For reading serial commands
+
+// Function to get elapsed time as a string (reduced memory usage version)
+void printElapsedTime() {
+  uint32_t elapsedSeconds = millis() / 1000;
+  uint8_t minutes = elapsedSeconds / 60;
+  uint8_t seconds = elapsedSeconds % 60;
+  Serial.print(F("["));
+  if (minutes < 10) Serial.print(F("0"));
+  Serial.print(minutes);
+  Serial.print(F(":"));
+  if (seconds < 10) Serial.print(F("0"));
+  Serial.print(seconds);
+  Serial.print(F("] "));
+}
+
+void setup() {
+  Serial.begin(9600);
+  startTime = millis();
+
+  // Initialize motors
+  motor1.setSpeed(0); motor1.run(RELEASE);
+  motor2.setSpeed(0); motor2.run(RELEASE);
+  motor3.setSpeed(0); motor3.run(RELEASE);
+  motor4.setSpeed(0); motor4.run(RELEASE);
+
+  // Initialize servo
+  waveServo.attach(SERVO_PIN);
+  waveServo.write(WAVE_START_POS);
+
+  // Random seed
   randomSeed(analogRead(A3));
-  
-  // Send initialization request to ESP32-CAM
-  Serial.println("INIT_REQUEST");
-  
-  // Print startup message
-  Serial.println("Robot initialized. Waiting for ESP32-CAM...");
+
+  // Warm up ping
+  distance = readPing();
+  delay(100);
+  distance = readPing();
+  delay(100);
+
+  printElapsedTime();
+  Serial.println(F("================================================="));
+  printElapsedTime();
+  Serial.println(F("********** ROBOT INITIALIZATION COMPLETE **********"));
+  printElapsedTime();
+  Serial.println(F("================================================="));
+  printElapsedTime();
+  Serial.println(F("PERSON DETECTION DEBUG ENABLED"));
+  printElapsedTime();
+  Serial.print(F("Serial buffer size: "));
+  Serial.println(SERIAL_RX_BUFFER_SIZE);
+  printElapsedTime();
+  Serial.println(F("Waiting for camera initialization..."));
 }
 
 void loop() {
-  // Read sensors
-  readUltrasonicSensor();
-  readMoistureSensor();
-  
-  // Check for commands from serial
+  uint32_t now = millis();
+
+  // Process serial commands (may set cameraInitialized or personDetected)
   checkSerialCommands();
+
+  // Read sensors
+  readMoistureSensor();
+  distance = readPing();
   
-  // Only proceed with state machine if ESP32-CAM is initialized
-  if (esp32CamInitialized) {
-    // State machine for robot behavior
-    switch (robotState) {
-      case STATE_IDLE:
-        handleIdleState();
-        break;
-        
-      case STATE_SEARCHING:
-        handleSearchingState();
-        break;
-        
-      case STATE_APPROACHING:
-        handleApproachingState();
-        break;
-        
-      case STATE_TALKING:
-        handleTalkingState();
-        break;
-        
-      case STATE_FOLLOWING:
-        handleFollowingState();
-        break;
-        
-      case STATE_ASKING_WATER:
-        handleAskingWaterState();
-        break;
-        
-      case STATE_AVOIDING_OBSTACLE:
-        handleObstacleAvoidanceState();
-        break;
-    }
-  } else {
-    // If ESP32-CAM not initialized, keep motors stopped
-    Stop();
+  // Debug distance readings (reduced frequency)
+  if (now % 3000 < 10) {
+    printElapsedTime();
+    Serial.print(F("DISTANCE: "));
+    Serial.print(distance);
+    Serial.println(F(" cm"));
+  }
+
+  // Periodic debug of person detection (reduced frequency)
+  if (now - lastPersonDebugTime >= PERSON_DEBUG_INTERVAL) {
+    lastPersonDebugTime = now;
     
-    // Periodically send initialization request
-    static unsigned long lastInitRequest = 0;
-    if (millis() - lastInitRequest > 5000) { // Every 5 seconds
-      Serial.println("INIT_REQUEST");
-      lastInitRequest = millis();
-      Serial.println("Waiting for ESP32-CAM initialization...");
+    printElapsedTime();
+    Serial.println(F("---------------------------------------------"));
+    printElapsedTime();
+    Serial.println(F("### ROBOT STATUS REPORT ###"));
+    printElapsedTime();
+    Serial.print(F("PERSON: "));
+    Serial.print(personDetected ? F("DETECTED") : F("NOT DETECTED"));
+    printElapsedTime();
+    
+    Serial.print(F("DIRECTION: "));
+    switch (personDirection) {
+      case DIRECTION_LEFT: Serial.println(F("LEFT")); break;
+      case DIRECTION_CENTER: Serial.println(F("CENTER")); break;
+      case DIRECTION_RIGHT: Serial.println(F("RIGHT")); break;
+      default: Serial.println(F("NONE")); break;
     }
+    
+    printElapsedTime();
+    Serial.print(F("STATE: "));
+    switch (robotState) {
+      case STATE_WAITING_FOR_CAMERA: Serial.println(F("WAITING_FOR_CAMERA")); break;
+      case STATE_IDLE: Serial.println(F("IDLE")); break;
+      case STATE_MOVING: Serial.println(F("MOVING")); break;
+      case STATE_APPROACHING_PERSON: Serial.println(F("APPROACHING_PERSON")); break;
+      default: Serial.println(F("UNKNOWN")); break;
+    }
+    
+    printElapsedTime();
+    Serial.print(F("MOISTURE: "));
+    Serial.print(moistureValue);
+    Serial.println(plantNeedsWater ? F(" (NEEDS WATER)") : F(" (Water OK)"));
+  }
+
+  // Periodic sensor data send (reduced frequency)
+  if (now - lastSensorDataSent >= SENSOR_DATA_INTERVAL) {
+    lastSensorDataSent = now;
+    Serial.print(F("SENSOR:"));
+    Serial.print(moistureValue);
+    Serial.print(F(":"));
+    Serial.print(distance);
+    Serial.print(F(":"));
+    Serial.print(robotState);
+    Serial.print(F(":"));
+    Serial.println(personDetected ? F("1") : F("0"));
+  }
+
+  // Waving logic - only wave after approaching is complete
+  if (personDetected && approachingComplete && !isWaving) {
+    startWaving();
+  }
+  if (isWaving) {
+    updateWaving(now);
+  }
+
+  // Force state transition to approaching if person is detected
+  if (personDetected && robotState != STATE_APPROACHING_PERSON && !approachingComplete) {
+    printElapsedTime();
+    Serial.println(F("!!! PERSON DETECTED - INITIATING APPROACH !!!"));
+    changeState(STATE_APPROACHING_PERSON);
+  }
+
+  // State machine
+  switch (robotState) {
+    case STATE_WAITING_FOR_CAMERA:
+      moveStop();
+      if (cameraInitialized) {
+        changeState(STATE_IDLE);
+      }
+      break;
+
+    case STATE_IDLE:
+      moveStop();
+      if (plantNeedsWater && cameraInitialized && !personDetected) {
+        changeState(STATE_MOVING);
+      } else if (personDetected && !approachingComplete) {
+        approachingComplete = false;
+        changeState(STATE_APPROACHING_PERSON);
+      }
+      break;
+
+    case STATE_MOVING:
+      if (personDetected) {
+        approachingComplete = false;
+        changeState(STATE_APPROACHING_PERSON);
+        break;
+      }
+      if (!plantNeedsWater || !cameraInitialized) {
+        changeState(STATE_IDLE);
+        break;
+      }
+      if (distance <= OBSTACLE_DISTANCE) {
+        avoidObstacle();
+      } else {
+        moveForward();
+      }
+      break;
+      
+    case STATE_APPROACHING_PERSON:
+      if (!personDetected) {
+        approachingComplete = false;
+        changeState(STATE_IDLE);
+        break;
+      }
+      
+      if (distance <= PERSON_APPROACH_DISTANCE && distance > 0) {
+        moveStop();
+        approachingComplete = true;
+        break;
+      }
+      
+      approachPerson();
+      break;
+  }
+
+  delay(10);
+}
+
+void approachPerson() {
+  if (distance <= PERSON_APPROACH_DISTANCE && distance > 0) {
+    moveStop();
+    approachingComplete = true;
+    return;
   }
   
-  delay(50); // Small delay for stability
-}
-
-void readUltrasonicSensor() {
-  digitalWrite(TRIG_PIN, LOW);
-  delayMicroseconds(2);
-  digitalWrite(TRIG_PIN, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(TRIG_PIN, LOW);
-
-  long duration = pulseIn(ECHO_PIN, HIGH);
-  distance_cm = duration * 0.034 / 2;
-
-  Serial.print("Distance: ");
-  Serial.print(distance_cm);
-  Serial.println(" cm");
-}
-
-void readMoistureSensor() {
-  moistureValue = analogRead(MOISTURE_PIN);  // Reads value from 0 to 1023
-  plantNeedsWater = moistureValue < MOISTURE_THRESHOLD;
-  
-  Serial.print("Moisture level: ");
-  Serial.print(moistureValue);
-  Serial.print(" - Plant needs water: ");
-  Serial.println(plantNeedsWater ? "YES" : "NO");
+  switch (personDirection) {
+    case DIRECTION_LEFT:
+      turnLeft();
+      delay(300);
+      moveForward();
+      break;
+      
+    case DIRECTION_RIGHT:
+      turnRight();
+      delay(300);
+      moveForward();
+      break;
+      
+    case DIRECTION_CENTER:
+    default:
+      moveForward();
+      break;
+  }
 }
 
 void checkSerialCommands() {
-  if (Serial.available() > 0) {
+  while (Serial.available() > 0) {
     command = Serial.read();
-    
-    // Update command timing for auto-initialization
-    lastCommandTime = millis();
-    if (firstCommandTime == 0) {
-      firstCommandTime = millis();
-    }
-    
-    // Check for ESP32-CAM initialization confirmation
-    if (command == 'I') { // 'I' for Initialized
-      esp32CamInitialized = true;
-      Serial.println("ESP32-CAM initialized successfully!");
-      return;
-    }
-    
-    // Auto-initialize if we've been receiving commands for a while
-    if (!esp32CamInitialized && (millis() - firstCommandTime > AUTO_INIT_TIMEOUT)) {
-      esp32CamInitialized = true;
-      Serial.println("ESP32-CAM auto-initialized based on command activity!");
-    }
-    
-    // Process commands - we'll now process them even if not fully initialized
-    // This allows the ESP32-CAM to control the robot as soon as it starts sending commands
-    switch(command) {
-        case 'F':
-          forward();
-          break;
-        case 'B':
-          back();
-          break;
-        case 'L':
-          left();
-          break;
-        case 'R':
-          right();
-          break;
-        case 'S':
-          Stop();
-          break;
-        case 'P': // Person detected command from ESP32-CAM
-          personDetected = true;
-          Serial.println("Person detected by camera");
-          // Track direction where human was last seen (for obstacle avoidance)
-          lastHumanDirection = 0; // Centered/forward
-          break;
-        case 'N': // No person detected from ESP32-CAM
-          personDetected = false;
-          Serial.println("No person detected by camera");
-          break;
-        case 'D': // Person detected on right side of camera view
-          personDetected = true;
-          lastHumanDirection = 1; // Right
-          Serial.println("Person detected on right");
-          break;
-        case 'A': // Person detected on left side of camera view
-          personDetected = true; 
-          lastHumanDirection = -1; // Left
-          Serial.println("Person detected on left");
-          break;
-      }
-    }
-}
 
-void handleIdleState() {
-  Stop();
-  
-  // If plant needs water, start searching
-  if (plantNeedsWater) {
-    changeState(STATE_SEARCHING);
-    searchStartTime = millis();
+    switch (command) {
+      case 'P':
+      case 'p':
+        personDetected = true;
+        personDirection = DIRECTION_CENTER;
+        personCommandReceived++;
+        approachingComplete = false;
+        if (robotState != STATE_APPROACHING_PERSON) {
+          changeState(STATE_APPROACHING_PERSON);
+        }
+        break;
+
+      case 'L':
+      case 'l':
+        personDetected = true;
+        personDirection = DIRECTION_LEFT;
+        personCommandReceived++;
+        approachingComplete = false;
+        if (robotState != STATE_APPROACHING_PERSON) {
+          changeState(STATE_APPROACHING_PERSON);
+        }
+        break;
+
+      case 'R':
+      case 'r':
+        personDetected = true;
+        personDirection = DIRECTION_RIGHT;
+        personCommandReceived++;
+        approachingComplete = false;
+        if (robotState != STATE_APPROACHING_PERSON) {
+          changeState(STATE_APPROACHING_PERSON);
+        }
+        break;
+
+      case 'N':
+        personDetected = false;
+        personDirection = DIRECTION_NONE;
+        approachingComplete = false;
+        break;
+
+      case 'I':
+        if (!cameraInitialized) {
+          cameraInitialized = true;
+        }
+        break;
+
+      case 'X':
+        cameraInitialized = false;
+        break;
+
+      case 'F':
+        moveForward();
+        break;
+
+      case 'B':
+        moveBackward();
+        break;
+
+      case 'T':
+        turnLeft();
+        break;
+
+      case 'Y':
+        turnRight();
+        break;
+
+      case 'S':
+        moveStop();
+        break;
+
+      default:
+        break;
+    }
   }
 }
 
-void handleSearchingState() {
-  // Search pattern: spin around to find a person
-  left();
+void startWaving() {
+  printElapsedTime();
+  Serial.println(F("********** STARTING WAVING MOTION **********"));
   
-  // If a person is detected by camera, start approaching
+  isWaving = true;
+  waveStartTime = millis();
+  lastWaveTime = millis();
+  waveServo.write(WAVE_START_POS);
+}
+
+void updateWaving(uint32_t currentTime) {
+  if (currentTime - waveStartTime >= WAVE_DURATION) {
+    isWaving = false;
+    waveServo.write(WAVE_START_POS);
+    printElapsedTime();
+    Serial.println(F("*** WAVING COMPLETE ***"));
+    return;
+  }
+  
+  if (currentTime - lastWaveTime >= 200) {
+    lastWaveTime = currentTime;
+    if ((currentTime / 200) % 2 == 0) {
+      waveServo.write(WAVE_LEFT_POS);
+    } else {
+      waveServo.write(WAVE_RIGHT_POS);
+    }
+  }
+}
+
+void avoidObstacle() {
   if (personDetected) {
-    Stop(); // Stop spinning when person detected
-    changeState(STATE_APPROACHING);
+    moveStop();
+    return;
   }
   
-  // Obstacle detection during searching
-  if (distance_cm < OBSTACLE_DISTANCE) {
-    // Just change direction if we encounter an obstacle while searching
-    right();
-    delay(1000);
-    left();
-  }
+  moveStop();
+  delay(300);
   
-  // Timeout: if searching for too long, go back to idle temporarily
-  if (millis() - searchStartTime > 20000) { // 20 seconds timeout
-    changeState(STATE_IDLE);
-    delay(5000); // Wait 5 seconds before potentially starting again
-  }
+  moveBackward();
+  delay(BACKWARD_DELAY);
+  
+  moveStop();
+  delay(300);
+
+  // Always turn right instead of random turning
+  turnRight();
+
+  moveStop();
+  delay(200);
 }
 
-void handleApproachingState() {
-  // Check if plant has been watered
-  if (!plantNeedsWater) {
-    // Plant got water, go back to idle
-    Stop();
-    changeState(STATE_IDLE);
-    return;
+int readPing() {
+  delay(70);
+  int cm = sonar.ping_cm();
+  if (cm == 0) {
+    return MAXIMUM_DISTANCE;
   }
-  
-  if (!personDetected) {
-    // Lost the person, go back to searching
-    changeState(STATE_SEARCHING);
-    return;
-  }
-  
-  // Check for obstacles
-  if (distance_cm < OBSTACLE_DISTANCE) {
-    // Obstacle detected, start avoidance
-    // Remember we were approaching before obstacle detection
-    changeState(STATE_AVOIDING_OBSTACLE);
-    obstacleAvoidanceStartTime = millis();
-    obstacleAvoidanceStage = AVOID_STAGE_TURN;
-    
-    // Choose random direction for initial turn (right or left)
-    obstacleAvoidanceDirection = (random(2) == 0) ? 1 : -1;
-    return;
-  }
-  
-  // Adjust trajectory based on human position
-  if (lastHumanDirection > 0) {
-    // Human is to the right, turn slightly right
-    adjustedForward(1);
-  } else if (lastHumanDirection < 0) {
-    // Human is to the left, turn slightly left
-    adjustedForward(-1);
-  } else {
-    // Human is centered or position unknown, go straight
-    forward();
-  }
-  
-  // If we get close enough to the human and need water, ask for it
-  if (distance_cm < APPROACH_DISTANCE && plantNeedsWater) {
-    // We've reached the person, stop and ask for water
-    Stop();
-    changeState(STATE_ASKING_WATER);
-    askingWaterStartTime = millis();
-    return;
-  } else if (distance_cm < APPROACH_DISTANCE) {
-    // We've reached the person, stop and start talking
-    Stop();
-    changeState(STATE_TALKING);
-    talkingStartTime = millis();
-    return;
-  }
+  return cm;
 }
 
-void handleObstacleAvoidanceState() {
-  // Check if plant has been watered during obstacle avoidance
-  if (!plantNeedsWater) {
-    // Plant got water, go back to idle
-    changeState(STATE_IDLE);
-    return;
-  }
+void readMoistureSensor() {
+  moistureValue = analogRead(MOISTURE_PIN);
+  plantNeedsWater = (moistureValue < MOISTURE_THRESHOLD);
   
-  // Check if we've spent too long avoiding obstacle
-  if (millis() - obstacleAvoidanceStartTime > OBSTACLE_TIMEOUT) {
-    // Timeout, go back to searching
-    changeState(STATE_SEARCHING);
-    return;
-  }
-  
-  // If the obstacle is clear and we're past the forward stage,
-  // return to approaching
-  if (distance_cm > OBSTACLE_DISTANCE * 1.5 && 
-      obstacleAvoidanceStage == AVOID_STAGE_RETURN) {
-    if (personDetected) {
-      changeState(STATE_APPROACHING);
+  // Only log significant moisture changes
+  static int lastMoistureValue = -1;
+  if (abs(moistureValue - lastMoistureValue) > 20) {
+    printElapsedTime();
+    Serial.print(F("MOISTURE: "));
+    Serial.print(moistureValue);
+    if (plantNeedsWater) {
+      Serial.println(F(" - PLANTS NEED WATER"));
     } else {
-      changeState(STATE_SEARCHING);
+      Serial.println(F(" - Water OK"));
     }
-    return;
-  }
-  
-  // Obstacle avoidance state machine
-  switch (obstacleAvoidanceStage) {
-    case AVOID_STAGE_TURN:
-      // Turn to avoid obstacle
-      if (obstacleAvoidanceDirection > 0) {
-        right();
-      } else {
-        left();
-      }
-      
-      // Check if we can see forward and path is clear
-      if (distance_cm > OBSTACLE_DISTANCE * 1.5) {
-        obstacleAvoidanceStage = AVOID_STAGE_FORWARD;
-      }
-      break;
-      
-    case AVOID_STAGE_FORWARD:
-      // Move forward to go around obstacle
-      forward();
-      
-      // Check if we've gone far enough
-      if (millis() - obstacleAvoidanceStartTime > 2000) {
-        obstacleAvoidanceStage = AVOID_STAGE_RETURN;
-      }
-      break;
-      
-    case AVOID_STAGE_RETURN:
-      // Turn back toward original direction
-      if (obstacleAvoidanceDirection > 0) {
-        left(); // Turn left if we turned right initially
-      } else {
-        right(); // Turn right if we turned left initially
-      }
-      
-      // Try to find the person again
-      if (personDetected) {
-        changeState(STATE_APPROACHING);
-      } else if (!personDetected && millis() - obstacleAvoidanceStartTime > 3000) {
-        // If we can't find the person after trying for a while, go back to searching
-        changeState(STATE_SEARCHING);
-      }
-      break;
-  }
-  
-  // Lost the person completely, go back to searching
-  if (!personDetected && millis() - obstacleAvoidanceStartTime > 4000) {
-    changeState(STATE_SEARCHING);
-  }
-}
-
-void handleTalkingState() {
-  Stop(); // Make sure we're stopped while talking
-  
-  // Check if plant has been watered during talking
-  if (!plantNeedsWater) {
-    // Plant got water, go back to idle
-    Stop();
-    changeState(STATE_IDLE);
-    return;
-  }
-  
-  // After talking for a while, switch to following mode
-  if (millis() - talkingStartTime > 5000) { // Talk for 5 seconds
-    changeState(STATE_FOLLOWING);
-  }
-  
-  // If person walks away during talking, go back to searching
-  if (!personDetected || distance_cm > APPROACH_DISTANCE * 2) {
-    changeState(STATE_SEARCHING);
-  }
-}
-
-void handleAskingWaterState() {
-  Stop(); // Make sure we're stopped while asking for water
-  
-  // Keep asking for water until plant is watered or timeout
-  if (!plantNeedsWater) {
-    // Plant got water, switch to happy and go to idle
-    changeState(STATE_IDLE);
-  }
-  
-  // If asking for too long, switch to following
-  if (millis() - askingWaterStartTime > 10000) { // Ask for 10 seconds
-    changeState(STATE_FOLLOWING);
-  }
-  
-  // If person walks away while asking, go back to approaching
-  if (!personDetected || distance_cm > APPROACH_DISTANCE * 2) {
-    changeState(STATE_SEARCHING);
-  }
-}
-
-void handleFollowingState() {
-  if (!personDetected) {
-    // Lost the person, go back to searching
-    changeState(STATE_SEARCHING);
-    return;
-  }
-  
-  // Check for obstacles
-  if (distance_cm < OBSTACLE_DISTANCE) {
-    // Obstacle detected, start avoidance
-    changeState(STATE_AVOIDING_OBSTACLE);
-    obstacleAvoidanceStartTime = millis();
-    obstacleAvoidanceStage = AVOID_STAGE_TURN;
-    obstacleAvoidanceDirection = (random(2) == 0) ? 1 : -1;
-    return;
-  }
-  
-  // Maintain follow distance
-  if (distance_cm < APPROACH_DISTANCE) {
-    // Too close, stop
-    Stop();
-  } else if (distance_cm < FOLLOW_DISTANCE) {
-    // Good distance, stay still
-    Stop();
-  } else {
-    // Too far, move closer while adjusting for human position
-    if (lastHumanDirection > 0) {
-      // Human is to the right, turn slightly right
-      adjustedForward(1);
-    } else if (lastHumanDirection < 0) {
-      // Human is to the left, turn slightly left
-      adjustedForward(-1);
-    } else {
-      // Human is centered or position unknown, go straight
-      forward();
-    }
-  }
-  
-  // If the plant needs water and we're close to a person, ask for water
-  if (plantNeedsWater && distance_cm < APPROACH_DISTANCE) {
-    Stop();
-    changeState(STATE_ASKING_WATER);
-    askingWaterStartTime = millis();
-    return;
-  }
-  
-  // Check if plant has been watered
-  if (!plantNeedsWater) {
-    // Plant got water, go back to idle
-    Stop(); // Make sure to stop before changing state
-    changeState(STATE_IDLE);
+    lastMoistureValue = moistureValue;
   }
 }
 
 void changeState(int newState) {
-  // Always stop motors when changing state
-  Stop();
-  
-  robotState = newState;
-  lastStateChange = millis();
-  
-  // Debug output
-  Serial.print("Changing state to: ");
-  switch (newState) {
-    case STATE_IDLE: Serial.println("IDLE"); break;
-    case STATE_SEARCHING: Serial.println("SEARCHING"); break;
-    case STATE_APPROACHING: Serial.println("APPROACHING"); break;
-    case STATE_TALKING: Serial.println("TALKING"); break;
-    case STATE_FOLLOWING: Serial.println("FOLLOWING"); break;
-    case STATE_ASKING_WATER: Serial.println("ASKING_WATER"); break;
-    case STATE_AVOIDING_OBSTACLE: Serial.println("AVOIDING_OBSTACLE"); break;
+  // Only change state if it's different
+  if (robotState != newState) {
+    robotState = newState;
+    lastStateChangeTime = millis();
+    
+    printElapsedTime();
+    Serial.println(F("================================================="));
+    printElapsedTime();
+    Serial.print(F("********** STATE CHANGE: "));
+    
+    switch (robotState) {
+      case STATE_WAITING_FOR_CAMERA: 
+        Serial.println(F("WAITING FOR CAMERA **********"));
+        break;
+      case STATE_IDLE:               
+        Serial.println(F("IDLE **********"));
+        break;
+      case STATE_MOVING:             
+        Serial.println(F("MOVING **********"));
+        break;
+      case STATE_APPROACHING_PERSON: 
+        Serial.println(F("APPROACHING PERSON **********"));
+        break;
+      default:
+        Serial.println(F("UNKNOWN **********"));
+        break;
+    }
   }
 }
 
-// Adjusted forward movement to slightly adjust course while moving
-void adjustedForward(int direction) {
-  // direction: -1 for left, 1 for right, 0 for straight
+void moveForward() {
+  // Only stop if person is detected AND approaching is complete
+  if (personDetected && approachingComplete) {
+    moveStop();
+    return;
+  }
   
-  motor1.setSpeed(255 - (direction > 0 ? 50 : 0)); // Reduce right side speed to turn right
-  motor1.run(FORWARD);
-  
-  motor2.setSpeed(255 - (direction < 0 ? 50 : 0)); // Reduce left side speed to turn left
-  motor2.run(FORWARD);
-  
-  motor3.setSpeed(255 - (direction > 0 ? 50 : 0)); // Reduce right side speed to turn right
-  motor3.run(FORWARD);
-  
-  motor4.setSpeed(255 - (direction < 0 ? 50 : 0)); // Reduce left side speed to turn left
-  motor4.run(BACKWARD);
+  if (!goesForward) {
+    goesForward = true;
+    
+    motor1.setSpeed(200); motor1.run(FORWARD);
+    motor2.setSpeed(200); motor2.run(FORWARD);
+    motor3.setSpeed(200); motor3.run(FORWARD);
+    motor4.setSpeed(200); motor4.run(BACKWARD);
+  }
 }
 
-void forward()
-{
+void moveBackward() {
+  goesForward = false;
   
-  motor1.setSpeed(255); //Define maximum speed
-  motor1.run(FORWARD); //rotate the motor clockwise
-  motor2.setSpeed(255); //Define maximum speed
-  motor2.run(FORWARD); //rotate the motor clockwise
-  motor3.setSpeed(255);//Define maximum speed
-  motor3.run(FORWARD); //rotate the motor clockwise
-  motor4.setSpeed(255);//Define maximum speed
-  motor4.run(BACKWARD); //rotate the motor counter-clockwise to actually move forward
+  motor1.setSpeed(200); motor1.run(BACKWARD);
+  motor2.setSpeed(200); motor2.run(BACKWARD);
+  motor3.setSpeed(200); motor3.run(BACKWARD);
+  motor4.setSpeed(200); motor4.run(FORWARD);
 }
 
-void back()
-{
+void turnRight() {
+  goesForward = false;
   
-  motor1.setSpeed(255); //Define maximum speed
-  motor1.run(BACKWARD); //rotate the motor counter-clockwise
-  motor2.setSpeed(255); //Define maximum speed
-  motor2.run(BACKWARD); //rotate the motor counter-clockwise
-  motor3.setSpeed(255); //Define maximum speed
-  motor3.run(BACKWARD); //rotate the motor counter-clockwise
-  motor4.setSpeed(255); //Define maximum speed
-  motor4.run(FORWARD); //rotate the motor clockwise to actually move backward
+  motor1.setSpeed(200); motor1.run(BACKWARD);
+  motor2.setSpeed(200); motor2.run(FORWARD);
+  motor3.setSpeed(200); motor3.run(FORWARD);
+  motor4.setSpeed(200); motor4.run(FORWARD);
+  
+  // Only auto-forward if not in approaching state
+  if (robotState != STATE_APPROACHING_PERSON) {
+    delay(TURN_DELAY);
+    moveForward();
+  }
 }
 
-void left()
-{
+void turnLeft() {
+  goesForward = false;
   
-  motor1.setSpeed(255); //Define maximum speed
-  motor1.run(FORWARD); //reversed: now rotate the motor clockwise
-  motor2.setSpeed(255); //Define maximum speed
-  motor2.run(BACKWARD); //rotate the motor counter-clockwise
-  motor3.setSpeed(255); //Define maximum speed
-  motor3.run(BACKWARD); //reversed: now rotate the motor counter-clockwise
-  motor4.setSpeed(255); //Define maximum speed
-  motor4.run(BACKWARD); //rotate the motor counter-clockwise (reversed direction)
+  motor1.setSpeed(200); motor1.run(FORWARD);
+  motor2.setSpeed(200); motor2.run(BACKWARD);
+  motor3.setSpeed(200); motor3.run(BACKWARD);
+  motor4.setSpeed(200); motor4.run(BACKWARD);
+  
+  // Only auto-forward if not in approaching state
+  if (robotState != STATE_APPROACHING_PERSON) {
+    delay(TURN_DELAY);
+    moveForward();
+  }
 }
 
-void right()
-{
+void moveStop() {
+  goesForward = false;
   
-  motor1.setSpeed(255); //Define maximum speed
-  motor1.run(BACKWARD); //reversed: now rotate the motor counter-clockwise
-  motor2.setSpeed(255); //Define maximum speed
-  motor2.run(FORWARD); //rotate the motor clockwise
-  motor3.setSpeed(255); //Define maximum speed
-  motor3.run(FORWARD); //reversed: now rotate the motor clockwise
-  motor4.setSpeed(255); //Define maximum speed
-  motor4.run(FORWARD); //rotate the motor clockwise (reversed direction)
-}
-
-void Stop()
-{
-  motor1.setSpeed(0); //Define minimum speed
-  motor1.run(RELEASE); //stop the motor when release the button
-  motor2.setSpeed(0); //Define minimum speed
-  motor2.run(RELEASE); //rotate the motor clockwise
-  motor3.setSpeed(0); //Define minimum speed
-  motor3.run(RELEASE); //stop the motor when release the button
-  motor4.setSpeed(0); //Define minimum speed
-  motor4.run(RELEASE); //stop the motor when release the button
+  motor1.setSpeed(0); motor1.run(RELEASE);
+  motor2.setSpeed(0); motor2.run(RELEASE);
+  motor3.setSpeed(0); motor3.run(RELEASE);
+  motor4.setSpeed(0); motor4.run(RELEASE);
 }

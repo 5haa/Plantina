@@ -11,7 +11,8 @@ let currentFps = 0;
 
 // Function to send commands to the robot
 function sendCommand(command) {
-    fetch('/command?cmd=' + command)
+    // Commands can now be sent regardless of any "mode"
+    fetch('/command?cmd=' + command) // Removed '&manual=true' as it's no longer needed
         .then(response => response.text())
         .then(data => {
             console.log('Command sent:', data);
@@ -25,6 +26,30 @@ setInterval(function() {
         .then(data => {
             document.getElementById('detection-status').innerText = 
                 data.detected ? 'Person Detected!' : 'No Person Detected';
+        });
+}, 1000);
+
+// Fetch sensor data periodically
+setInterval(function() {
+    fetch('/sensor_data')
+        .then(response => response.json())
+        .then(data => {
+            document.getElementById('moisture-value').innerText = data.moisture;
+            document.getElementById('moisture-status').innerText = 
+                data.plantNeedsWater ? 'Needs Water' : 'Moist';
+            document.getElementById('distance-value').innerText = data.distance;
+            // document.getElementById('robot-state').innerText = data.state; // 'state' might not be available if robot_state was removed from Python
+            // If 'data.state' is indeed removed from the Python backend, you should comment out or remove the line above.
+            // For now, I'll assume it might still be part of the sensor data for other purposes.
+            // If you confirm it's gone, remove the line above.
+            if (data.state !== undefined) {
+                 document.getElementById('robot-state').innerText = data.state;
+            } else {
+                 document.getElementById('robot-state').innerText = "--"; // Default if state is not sent
+            }
+        })
+        .catch(error => {
+            console.error('Error fetching sensor data:', error);
         });
 }, 1000);
 
@@ -54,7 +79,7 @@ function updateFps() {
 
 // Toggle between browser cam and ESP32-CAM
 function toggleMode() {
-    fetch('/toggle_mode')
+    fetch('/toggle_mode') // Assuming you have a '/toggle_mode' endpoint in your Flask app
         .then(response => response.json())
         .then(data => {
             let modeName = data.mode === 'browser_cam' ? 'Browser Camera' : 'ESP32-CAM';
@@ -80,6 +105,11 @@ function toggleMode() {
             
             // Refresh video stream
             refreshVideoStream();
+        })
+        .catch(error => {
+            console.error('Error toggling mode:', error);
+            // Fallback or error message to user
+            document.getElementById('mode-name').innerText = "Error switching mode";
         });
 }
 
@@ -165,6 +195,7 @@ function captureBrowserFrame() {
     lastCaptureSent = now;
     
     // Send to server without updating status (to avoid flickering)
+    // Assuming you have a '/browser_upload' endpoint
     fetch('/browser_upload', {
         method: 'POST',
         headers: {
@@ -188,9 +219,12 @@ document.addEventListener('DOMContentLoaded', function() {
     browserVideo = document.getElementById('browser-video');
     
     // Monitor video feed performance
-    document.getElementById('video-feed').onload = function() {
-        updateFps();
-    };
+    const videoFeedElement = document.getElementById('video-feed');
+    if (videoFeedElement) {
+        videoFeedElement.onload = function() {
+            updateFps();
+        };
+    }
     
     // Force video feed refresh every 5 seconds in case of stalls
     setInterval(function() {
@@ -198,17 +232,26 @@ document.addEventListener('DOMContentLoaded', function() {
     }, 5000);
     
     // Initialize the UI based on server state
-    const useWebcam = document.body.getAttribute('data-webcam') === 'true';
+    const useWebcamInitial = document.body.getAttribute('data-webcam') === 'true';
     
     // Update mode displays
-    document.getElementById('mode-name').innerText = useWebcam ? 'Browser Camera' : 'ESP32-CAM';
-    document.querySelector('.mode-button').innerText = 'Switch to ' + (useWebcam ? 'ESP32-CAM' : 'Browser Camera');
+    // Assuming the initial mode is ESP32-CAM unless 'data-webcam' is explicitly true
+    // or you fetch this initial state from the server.
+    // For simplicity, let's assume default is ESP32-CAM if not specified by 'data-webcam'
+    let initialModeName = useWebcamInitial ? 'Browser Camera' : 'ESP32-CAM';
+    document.getElementById('mode-name').innerText = initialModeName;
+    let toggleButton = document.querySelector('.mode-button');
+    if (toggleButton) {
+        toggleButton.innerText = 'Switch to ' + (initialModeName === 'Browser Camera' ? 'ESP32-CAM' : 'Browser Camera');
+    }
     
-    // Show/hide browser camera section
-    document.getElementById('browser-cam-section').style.display = useWebcam ? 'block' : 'none';
+    const browserCamSection = document.getElementById('browser-cam-section');
+    if (browserCamSection) {
+        browserCamSection.style.display = useWebcamInitial ? 'block' : 'none';
+    }
     
     // Start browser camera if we're in webcam mode
-    if (useWebcam) {
+    if (useWebcamInitial && browserVideo) { // ensure browserVideo is found
         setTimeout(startBrowserCamera, 500);
     }
-}); 
+});

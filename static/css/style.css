@@ -1,78 +1,284 @@
 body {
     font-family: Arial, sans-serif;
     margin: 0;
-    padding: 20px;
-    text-align: center;
+    padding: 0;
+    min-height: 100vh;
+    overflow: hidden; /* Prevents scrollbars if content fits */
 }
+
 h1 {
     color: #333;
+    margin-top: 0;
+    padding: 15px 0;
+    font-size: 24px;
 }
-.container {
-    max-width: 800px;
-    margin: 0 auto;
+
+h3 {
+    margin-top: 0;
+    color: #333;
+    font-size: 18px;
 }
+
+/* Main container with two columns */
+.main-container {
+    display: flex;
+    flex-direction: row;
+    height: 100vh; /* Full viewport height */
+    width: 100%;
+}
+
+/* Left column - Camera */
+.camera-column {
+    flex: 3; /* Takes 3/5 of the width */
+    padding: 15px;
+    background-color: #f8f8f8;
+    overflow-y: auto; /* Scroll if content overflows vertically */
+    display: flex;
+    flex-direction: column;
+    align-items: center; /* Center content horizontally */
+}
+
+/* Right column - Controls */
+.controls-column {
+    flex: 2; /* Takes 2/5 of the width */
+    padding: 15px;
+    background-color: #f0f0f0;
+    overflow-y: auto; /* Scroll if content overflows vertically */
+}
+
+/* Video container */
 .video-container {
-    margin: 20px 0;
+    margin: 10px 0;
+    display: flex;
+    justify-content: center; /* Center video feed */
 }
+
+#video-feed {
+    max-width: 100%; /* Responsive video feed */
+    height: auto;
+    border: 1px solid #ccc;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+}
+
+/* Controls section */
 .controls {
-    margin: 20px 0;
+    margin: 15px 0;
+    background-color: #e8f4e8; /* Light green background */
+    padding: 15px;
+    border-radius: 6px;
 }
+
+.control-buttons {
+    display: flex;
+    flex-direction: column;
+    align-items: center; /* Center buttons */
+    gap: 10px; /* Space between button rows */
+}
+
+.btn-row {
+    display: flex;
+    gap: 10px; /* Space between buttons in a row */
+}
+
 button {
-    background-color: #4CAF50;
+    background-color: #4CAF50; /* Green */
     border: none;
     color: white;
-    padding: 10px 20px;
+    padding: 12px 20px;
     text-align: center;
     text-decoration: none;
-    display: inline-block;
     font-size: 16px;
-    margin: 4px 2px;
     cursor: pointer;
-    border-radius: 4px;
+    border-radius: 6px;
+    transition: background-color 0.3s;
+    min-width: 80px; /* Minimum button width */
 }
+
+button:hover {
+    background-color: #3e8e41; /* Darker green on hover */
+}
+
+button:active {
+    background-color: #367c39; /* Even darker green when active */
+}
+
 .status {
-    margin: 20px 0;
-    padding: 10px;
-    background-color: #f0f0f0;
-    border-radius: 4px;
+    margin: 15px 0;
+    padding: 15px;
+    background-color: #f0f0f0; /* Light gray background */
+    border-radius: 6px;
+    border-left: 4px solid #666; /* Dark gray left border */
 }
+
 .mode-switch {
-    margin: 20px 0;
-    padding: 10px;
-    background-color: #e0e0ff;
-    border-radius: 4px;
-}
-.mode-button {
-    background-color: #4747ff;
-}
-.help-text {
+    width: 100%;
     margin: 10px 0;
-    color: #666;
-    font-size: 0.9em;
-}
-.browser-cam-container {
-    margin: 20px 0;
     padding: 10px;
-    background-color: #ffe0e0;
-    border-radius: 4px;
+    background-color: #e0e0ff; /* Light blue background */
+    border-radius: 6px;
+    text-align: center;
 }
+
+.mode-button {
+    background-color: #4747ff; /* Blue */
+}
+
+.mode-button:hover {
+    background-color: #3535ee; /* Darker blue on hover */
+}
+
+/* Browser camera styles */
+.browser-cam-container {
+    width: 100%;
+    margin: 10px 0;
+    padding: 10px;
+    background-color: #ffe0e0; /* Light red background */
+    border-radius: 6px;
+    text-align: center;
+}
+
 #browser-video {
-    width: 320px;
+    width: 320px; /* Fixed size for browser video preview */
     height: 240px;
     border: 1px solid #999;
-    background-color: #000;
+    background-color: #000; /* Black background if camera not active */
+    margin: 0 auto; /* Center the video element */
+    display: block;
 }
+
 .browser-cam-controls {
     margin: 10px 0;
 }
+
 /* Performance stats display */
 #performance-stats {
     position: absolute;
     bottom: 10px;
     right: 10px;
-    background-color: rgba(0,0,0,0.5);
+    background-color: rgba(0,0,0,0.7); /* Semi-transparent black */
     color: white;
-    padding: 5px;
+    padding: 5px 10px;
     font-size: 12px;
     border-radius: 3px;
-} 
+}
+
+/* Sensor stats display */
+.sensor-stats {
+    margin: 15px 0;
+    padding: 15px;
+    background-color: #e0ffe0; /* Light green background */
+    border-radius: 6px;
+    border-left: 4px solid #4CAF50; /* Green left border */
+}
+
+/* Control mode toggle - This section is now removed from HTML, so styles are not strictly necessary
+   but kept here in case you decide to re-add it or repurpose the styles. */
+.control-mode {
+    margin: 15px 0;
+    padding: 15px;
+    background-color: #fff0e0; /* Light orange background */
+    border-radius: 6px;
+    border-left: 4px solid #ff9800; /* Orange left border */
+}
+
+.toggle-container {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 10px 0;
+}
+
+.toggle-container span {
+    margin: 0 10px;
+    font-weight: bold;
+}
+
+.switch {
+    position: relative;
+    display: inline-block;
+    width: 60px;
+    height: 30px;
+}
+
+.switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: #4CAF50; /* Default green for "Auto" side */
+    transition: .4s;
+    box-shadow: inset 0 0 5px rgba(0,0,0,0.2);
+}
+
+.slider:before {
+    position: absolute;
+    content: "";
+    height: 22px;
+    width: 22px;
+    left: 4px;
+    bottom: 4px;
+    background-color: white;
+    transition: .4s;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+}
+
+input:checked + .slider {
+    background-color: #ff9800; /* Orange for "Manual" side when checked */
+}
+
+input:focus + .slider {
+    box-shadow: 0 0 1px #ff9800; /* Focus outline */
+}
+
+input:checked + .slider:before {
+    transform: translateX(30px); /* Move toggle to the right */
+}
+
+.slider.round {
+    border-radius: 30px;
+}
+
+.slider.round:before {
+    border-radius: 50%;
+}
+
+/* Responsive adjustments for smaller screens/heights */
+@media (max-height: 800px) {
+    h1 {
+        font-size: 20px;
+        padding: 10px 0;
+    }
+    
+    .camera-column, .controls-column {
+        padding: 10px; /* Reduce padding */
+    }
+    
+    button {
+        padding: 8px 15px; /* Smaller buttons */
+    }
+}
+
+@media (max-width: 768px) { /* For smaller screen widths, stack columns */
+    .main-container {
+        flex-direction: column; /* Stack columns vertically */
+        height: auto; /* Allow height to grow with content */
+    }
+
+    .camera-column, .controls-column {
+        flex: 1; /* Let them take available space */
+        width: 100%; /* Full width when stacked */
+        overflow-y: visible; /* Disable internal scroll on columns when stacked */
+    }
+
+    body {
+        overflow: auto; /* Allow body to scroll when columns are stacked */
+    }
+}
